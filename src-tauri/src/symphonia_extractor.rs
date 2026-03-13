@@ -7,9 +7,9 @@ use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use symphonia::core::io::MediaSourceStream;
 use symphonia::default::{get_codecs, get_probe};
 use symphonia_adapter_fdk_aac::AacDecoder;
 
@@ -39,11 +39,15 @@ pub fn extract_audio_to_wav(input: &Path, output: &Path) -> anyhow::Result<()> {
         .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
         .ok_or_else(|| anyhow::anyhow!("no supported audio track found (the file may not contain audio, or the codec is unsupported)"))?;
 
-    let mut decoder: Box<dyn symphonia::core::codecs::Decoder> = if track.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_AAC {
-        Box::new(AacDecoder::try_new(&track.codec_params, &DecoderOptions::default())?)
-    } else {
-        get_codecs().make(&track.codec_params, &DecoderOptions::default())?
-    };
+    let mut decoder: Box<dyn symphonia::core::codecs::Decoder> =
+        if track.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_AAC {
+            Box::new(AacDecoder::try_new(
+                &track.codec_params,
+                &DecoderOptions::default(),
+            )?)
+        } else {
+            get_codecs().make(&track.codec_params, &DecoderOptions::default())?
+        };
 
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
     let channels = track
@@ -117,4 +121,3 @@ fn write_wav(output: &Path, spec: WavSpec, samples: &[i16]) -> anyhow::Result<()
     writer.finalize()?;
     Ok(())
 }
-

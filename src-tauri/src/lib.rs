@@ -8,33 +8,14 @@ mod symphonia_extractor;
 use symphonia_extractor::extract_audio_to_wav;
 
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
-#[tauri::command]
-fn pick_mp4_file(app: AppHandle) -> Result<String, String> {
-    let path = app
-        .dialog()
-        .file()
-        .blocking_pick_file()
-        .ok_or_else(|| "no file selected".to_string())?;
-
-    // Convert the plugin FilePath enum into a filesystem path when possible.
-    // On some platforms (e.g. Android content:// URIs) this may fail and return an error.
-    let path = path
-        .into_path()
-        .map_err(|e| format!("failed to convert selected file path: {e}"))?;
-
-    Ok(path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
 fn extract_audio_from_video(input_path: String) -> Result<String, String> {
     let input_path = Path::new(&input_path);
 
     if !input_path.exists() {
-        return Err(format!("input file does not exist: {}", input_path.display()));
+        return Err(format!(
+            "input file does not exist: {}",
+            input_path.display()
+        ));
     }
 
     let output_path = input_path.with_extension("wav");
@@ -49,9 +30,10 @@ fn extract_audio_from_video(input_path: String) -> Result<String, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![greet, pick_mp4_file, extract_audio_from_video])
+        .invoke_handler(tauri::generate_handler![extract_audio_from_video])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
