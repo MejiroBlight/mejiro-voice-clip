@@ -3,11 +3,32 @@
 
   let name = $state("");
   let greetMsg = $state("");
+  let extractMsg = $state("");
 
   async function greet(event: Event) {
     event.preventDefault();
     // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
     greetMsg = await invoke("greet", { name });
+  }
+
+  async function extractAudio() {
+    extractMsg = "Selecting MP4 file...";
+
+    try {
+      const inputPath = await invoke("pick_mp4_file");
+      if (!inputPath) {
+        extractMsg = "No file selected.";
+        return;
+      }
+
+      extractMsg = "Extracting audio...";
+      const outPath = await invoke("extract_audio_from_video", {
+        inputPath,
+      });
+      extractMsg = `WAV written to: ${outPath}`;
+    } catch (e) {
+      extractMsg = `Error: ${e}`;
+    }
   }
 </script>
 
@@ -32,6 +53,11 @@
     <button type="submit">Greet</button>
   </form>
   <p>{greetMsg}</p>
+
+  <div class="row" style="flex-direction: column; gap: 0.5rem;">
+    <button type="button" onclick={extractAudio}>Extract audio from MP4</button>
+    <p>{extractMsg}</p>
+  </div>
 </main>
 
 <style>

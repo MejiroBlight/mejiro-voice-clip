@@ -10,6 +10,9 @@
   - `@tauri-apps/api/core` の `invoke` を使って Rust 側コマンドを呼び出す実装あり。
 - **バックエンド（Rust）**
   - `src-tauri/src/lib.rs` に `greet(name: &str) -> String` コマンドが実装されている。
+  - `src-tauri/src/lib.rs` に `extract_audio_from_video(input_path: String) -> String` コマンドを追加し、Symphonia で MP4 から音声トラックを抽出して WAV を出力する機能を試験的に実装。
+  - AAC が `malformed stream: aac: invalid data` になる場合に備えて、`symphonia-adapter-fdk-aac` を導入し、AAC 時は FDK AAC デコーダを使うようフォールバック実装を追加。
+  - `tauri-plugin-dialog` を使ってファイルダイアログで MP4 を選択できるようにした。
   - `src-tauri/src/main.rs` から `mejiro_voice_clip_lib::run()` を実行し、Tauri アプリを起動する構成。
 - **ビルド/実行**
   - `npm run tauri dev` で開発環境起動可能。
