@@ -6,8 +6,12 @@
 
 - **プロジェクト構成**：SvelteKit + Tauri の標準テンプレートとして初期化済み。
 - **フロントエンド（Svelte）**
-  - ルートページ (`src/routes/+page.svelte`) に簡易 UI（入力フォーム・ボタン・結果表示）を実装。
-  - `@tauri-apps/api/core` の `invoke` を使って Rust 側コマンドを呼び出す実装あり。
+  - ルートページ (`src/routes/+page.svelte`) にメディアファイルを選択して波形を表示する UI を実装。
+    - WaveSurfer.js を使い、再生/一時停止、時間移動、波形表示、タイムライン、リージョン作成・管理が可能。
+    - 選択したファイルは `@tauri-apps/plugin-fs` の `readFile` で読み込み、Blob URL として WaveSurfer に渡して再生する。
+  - タグ管理機能（タグの追加・編集・色指定）を実装し、リージョンに色を割り当てる仕組みを含む。
+  - `<dialog>` を用いたタグ管理モーダルを実装し、クリックで閉じる挙動などの UI 動作を実装。
+  - 一部で `@tauri-apps/api/core` の `invoke` も利用可能な状態（Rust 側コマンド呼び出し対応）を残したままになっている。
 - **バックエンド（Rust）**
   - `src-tauri/src/lib.rs` に `greet(name: &str) -> String` コマンドが実装されている。
   - `src-tauri/src/lib.rs` に `extract_audio_from_video(input_path: String) -> String` コマンドを追加し、Symphonia で MP4 から音声トラックを抽出して WAV を出力する機能を試験的に実装。

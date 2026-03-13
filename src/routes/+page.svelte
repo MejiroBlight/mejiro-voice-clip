@@ -3,7 +3,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { readFile } from '@tauri-apps/plugin-fs';
   import WaveSurfer from 'wavesurfer.js';
-  import RegionsPlugin, { type RegionParams } from 'wavesurfer.js/dist/plugins/regions.esm.js';
+  import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
   import ZoomPlugin from 'wavesurfer.js/dist/plugins/zoom.esm.js';
   import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js'
   import { onMount } from "svelte";
@@ -19,7 +19,7 @@
 
   let fileName = $state("No file selected");
   let videoElement: HTMLVideoElement | null = $state(null);
-  let regions: RegionsPlugin | null;
+  let regions: RegionsPlugin | null = $state(null);
   let wavesurfer = $state<WaveSurfer>();
   let isPlaying = $state(false);
   let editingRegionName = $state("");
@@ -30,7 +30,11 @@
   let newTagName = $state("");
   let newTagColor = $state("");
   let selectedTag: Tag | null = $state(null);
-  let extractMsg = $state("");
+  let regionIds = $state<string[]>([]);
+  let regionManageMode: "add" | "edit" | null = $state("add");
+  let selectedRegionId: string | null = $state(null);
+  let logs: string[] = $state([]);
+  let logPanelBody: HTMLDivElement | null = $state(null);
 
   $effect(() => {
     if (tagManageMode === "edit" && selectedTag) {
@@ -43,9 +47,19 @@
     }
   });
 
-  const selectedColor = "#a0b4ff";
-  const nonSelectedColor = "#f6f6f6";
-  const defaultRegionColor = "#b8b8b8";
+  $effect(() => {
+    if (regionManageMode === "edit" && selectedRegionId && regions) {
+      const r = regions.getRegions().find(r => r.id === selectedRegionId);
+      if (r) {
+        editingRegionName = r.content?.textContent || "";
+        editingTag = tags.find(t => t.color === r.color) || null;
+      }
+    } else {
+      editingRegionName = "";
+      editingTag = null;
+      selectedRegionId = null;
+    }
+  });
 
   const randomColor = () => {
     const letters = '0123456789ABCDEF';
@@ -78,6 +92,19 @@
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
   }
 
+  function getCssProp(prop: string): string {
+    return getComputedStyle(document.documentElement).getPropertyValue(prop).trim();
+  }
+
+  function pushLog(msg: string) {
+    const t = new Date().toLocaleTimeString();
+    logs = [...logs, `${t} ${msg}`];
+    // auto-scroll
+    setTimeout(() => {
+      logPanelBody?.scrollTo({ top: logPanelBody.scrollHeight, behavior: 'smooth' });
+    }, 0);
+  }
+
   onMount(() => {
     regions = RegionsPlugin.create();
     wavesurfer = WaveSurfer.create({
@@ -99,9 +126,37 @@
       mediaControls: true,
       minPxPerSec: 100,
     });
-    wavesurfer.on('play', () => isPlaying = true);
-    wavesurfer.on('pause', () => isPlaying = false);
+    wavesurfer.on('play', () =>{
+      isPlaying = true;
+      if (!regions) return;
+      const startMarker = regions.getRegions().find(r => r.id === 'start');
+      if (startMarker){
+        startMarker.setOptions({start: wavesurfer!.getCurrentTime()});
+      }else{
+        regions.addRegion({
+          id: 'start',
+          start: wavesurfer!.getCurrentTime(),
+          color: 'rgba(255, 123, 0, 0.3)',
+          drag: false,
+          resize: false
+        });
+      }
+    });
+    wavesurfer.on('pause', () => {
+      isPlaying = false;
+    });
+    regions.on('region-created', () => updateRegionIds());
+    regions.on('region-updated', () => updateRegionIds());
+    regions.on('region-removed', () => updateRegionIds());
   });
+
+  function updateRegionIds() {
+    if (!regions) return;
+    regionIds = regions.getRegions()
+      .filter(r => r.id !== 'start' && r.id !== 'temp')
+      .sort((a, b) => a.start - b.start)
+      .map(r => r.id);
+  }
 
   async function initValues() {
     fileName = "No file selected.";
@@ -125,13 +180,16 @@
     });
     if (!inputPath) {
       fileName = "No file selected.";
+      pushLog("File selection cancelled.");
       return;
     }
     fileName = inputPath.split(/[\\/]/).pop() || fileName;
+    pushLog(`Selected file: ${fileName}`);
     await loadSourceFromPath(inputPath);
   }
 
   async function loadSourceFromPath(path: string) {
+    pushLog("Loading media...");
     try {
       const bin = await readFile(path as string);
       let arrayBuffer: ArrayBuffer;
@@ -158,8 +216,10 @@
         throw new Error('Video element not found');
       }
       wavesurfer?.load(url);
+      pushLog("Media loaded.");
     } catch (error) {
       console.error("Error loading media:", error);
+      pushLog(`Error loading media: ${error}`);
     }
   }
 
@@ -183,11 +243,13 @@
         drag: false,
         resize: true
       });
+      pushLog(`Temp region started at ${start.toFixed(2)}s`);
     } else {
       tempRegion.setOptions({ start });
       if (tempRegion.end <= start) {
         tempRegion.setOptions({ end: start + 1 });
       }
+      pushLog(`Temp region updated start to ${start.toFixed(2)}s`);
     }
   }
 
@@ -198,6 +260,7 @@
     const end = wavesurfer.getCurrentTime();
     if (end > tempRegion.start) {
       tempRegion.setOptions({ end });
+      pushLog(`Temp region end set to ${end.toFixed(2)}s`);
     }
   }
 
@@ -205,7 +268,7 @@
     if (!wavesurfer || !regions || editingRegionName == "") return;
     const tempRegion = regions.getRegions().find(r => r.id === 'temp');
     if (!tempRegion) return;
-    const color = editingTag ? editingTag.color : defaultRegionColor;
+    const color = editingTag ? editingTag.color : getCssProp('--default-region-color');
     regions.addRegion({
       start: tempRegion.start,
       end: tempRegion.end,
@@ -214,12 +277,30 @@
       resize: false,
       content: editingRegionName,
     });
+    pushLog(`Added region "${editingRegionName}" (${tempRegion.start.toFixed(2)}s - ${tempRegion.end?.toFixed(2)}s)`);
+    resetTempRegion();
   }
 
-  function handleDialogClick(event: MouseEvent) {
-    if (event.target === tagDialog) {
-      tagDialog?.close();
+  function playRegion(id: string) {
+    if (!wavesurfer || !regions) return;
+    const region = regions.getRegions().find(r => r.id === id);
+    if (!region) return;
+    pushLog(`Playing region ${id} (${region.start.toFixed(2)}s - ${region.end?.toFixed(2) ?? 'end'}s)`);
+    if (!region.end) {
+      wavesurfer.play(region.start);
+    }else{
+      wavesurfer.play(region.start, region.end);
     }
+  }
+
+  function resetTempRegion() {
+    if (!regions) return;
+    const tempRegion = regions.getRegions().find(r => r.id === 'temp');
+    if (tempRegion) {
+      tempRegion.remove();
+      pushLog('Temp region reset');
+    }
+    editingRegionName = "";
   }
 
   function manageTag(){
@@ -235,6 +316,9 @@
         return;
       }
       tags = [...tags, { name: newTagName, color: newRgba }];
+      pushLog(`Tag added: ${newTagName}`);
+      newTagName = "";
+      newTagColor = randomColor();
     } else if (tagManageMode === "edit" && selectedTag) {
       if (newTagName.trim() === "") return;
       if (tags.some(tag => tag.name === newTagName && tag !== selectedTag)) {
@@ -248,11 +332,25 @@
       const newTag: Tag = { name: newTagName, color: newRgba };
       tags = tags.map(tag => tag === selectedTag ? newTag : tag);
       replaceTag(selectedTag, newTag);
+      pushLog(`Tag edited: ${selectedTag.name} -> ${newTagName}`);
+      selectedTag = null;
+      newTagName = "";
+      newTagColor = randomColor();
     }
   }
 
   function replaceTag(oldTag: Tag, newTag: Tag | null) {
-
+    if (!regions) return;
+    const allRegions = regions.getRegions();
+    allRegions.forEach(region => {
+      if (region.color === oldTag.color) {
+        region.setOptions({ color: newTag ? newTag.color : getCssProp('--default-region-color') });
+      }
+    });
+    if (editingTag === oldTag) {
+      editingTag = newTag;
+    }
+    pushLog(`Replaced tag colors: ${oldTag.name} -> ${newTag?.name ?? 'default'}`);
   }
 </script>
 
@@ -279,8 +377,8 @@
     <div class="controls">
       <button onclick={tempRegionStart} title="Set temp start"><ArrowLeftToLine size="16"/></button>
       <button onclick={tempRegionEnd} title="Set temp end"><ArrowRightToLine size="16"/></button>
-      <button title="Play temp region"><Disc size="16"/></button>
-      <button title="Reset temp region"><Trash2 size="16"/></button>
+      <button onclick={() => playRegion("temp")} title="Play temp region"><Disc size="16"/></button>
+      <button onclick={resetTempRegion} title="Reset temp region"><Trash2 size="16"/></button>
       <div class="tag-controls">
         <div class="box" style="background-color:{editingTag ? editingTag.color : undefined};"></div>
         <select bind:value={editingTag}>
@@ -306,10 +404,43 @@
     </button>
   </div>
   <div class="right">
-
+    <div class=regions>
+      <div class=controls>
+        <select bind:value={regionManageMode}>
+          <option value="add">Add Region</option>
+          <option value="edit">Edit Region</option>
+        </select>
+      </div>
+      <div class="list">
+        {#each regionIds as id}
+          {@const r = regions?.getRegions().find(r => r.id === id)}
+          <button class="panel" data-select={selectedRegionId==id} onclick={() =>{
+            if (regionManageMode == "edit") {
+              selectedRegionId = id;
+              if (r) {
+                editingRegionName = r.content?.textContent || "";
+                editingTag = tags.find(t => t.color === r.color) || null;
+              }
+            }
+          }}>
+            <Play size="16"/>
+            <div class="box" style="background-color:{r?.color ?? undefined}"></div>
+            <span>{r?.content?.textContent ?? "Unnamed"}</span>
+          </button>
+        {/each}
+      </div>
+    </div>
+    <div class="log">
+      <div class="header">Logs</div>
+      <div class="body" bind:this={logPanelBody}>
+        {#each logs as l, i (i)}
+          <div class="line">{l}</div>
+        {/each}
+      </div>
+    </div>
   </div>
 </main>
-<dialog id="tag-dialog" bind:this={tagDialog} onclick={handleDialogClick}>
+<dialog id="tag-dialog" bind:this={tagDialog}>
   <div class="tag-dialog">
     <select bind:value={tagManageMode}>
       <option value="add">Add Tag</option>
@@ -332,6 +463,7 @@
         </button>
       {/each}
     </div>
+    <button onclick={() => tagDialog?.close()}>Apply</button>
   </div>
 </dialog>
 
@@ -344,12 +476,15 @@
 
 .container {
   display: grid;
-  flex-direction: column;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   height: calc(100vh - 16px);
 }
 
-.controls { display:flex; gap:8px; align-items:left; }
+.controls { 
+  display:flex; 
+  gap:8px; 
+  align-items:left; 
+}
 
 .left {
   border-right: 1px solid #0f0f0f;
@@ -406,23 +541,19 @@
   }
 }
 
-.tag-dialog {
+.right {
+  display: grid;
+  padding-left: 8px;
+  grid-template-rows: minmax(0, 3fr) minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+
+.list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  & .controls {
-    display: flex;
-    flex-direction: row;
-    gap: 4px;
-  }
-  & .list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    max-height: 200px;
-    width: 250px;
-    overflow-y: auto;
-  }
+  gap: 4px;
+  overflow-y: auto;
   & .panel {
     border: 1px solid #1d1d1d;
     border-radius: 4px;
@@ -438,6 +569,52 @@
     & .box {
       height: 16px;
     }
+  }
+}
+
+.regions {
+  display: flex;
+  flex-direction: column;
+  & .controls {
+    padding: 4px 0;
+  }
+}
+
+.log {
+    background: #0f1724;
+    color: #e6eef8;
+    border: 1px solid #2b3a4a;
+    font-family: monospace;
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+  & .header { 
+    padding: 6px 8px; 
+    background: #0b1220; 
+    border-bottom: 1px solid #1f2a38; 
+    font-weight: 600; 
+  }
+  & .body {
+    padding: 8px; 
+    max-height: 100%;
+    overflow-y: auto;
+  }
+  & .line { 
+    margin-bottom: 4px; 
+    white-space: pre-wrap; 
+    color: #cfe7ff; 
+  }
+}
+.tag-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  & .controls {
+    gap: 4px;
+  }
+  & .list {
+    max-height: 200px;
+    width: 250px;
   }
 }
 </style>
