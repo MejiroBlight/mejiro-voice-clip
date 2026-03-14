@@ -41,6 +41,7 @@
   let exportMode: "index_tag_name" | "tag_name" | "start_tag_name" | "name" = $state("index_tag_name");
   let exportPath: string | null = $state(null);
   let exportProgress = $state(0);
+  let exportingDialog: HTMLDialogElement | null = $state(null);
 
   $effect(() => {
     if (tagManageMode === "edit"){
@@ -484,7 +485,7 @@
       unlistenLog = await listen<string>("export-log", (event) => {
         pushLog(event.payload);
       });
-
+      exportingDialog?.showModal();
       await invoke('export_regions', { inputPath, outDir: exportPath, regions: exportData });
       pushLog(`Exported ${exportData.length} regions to ${exportPath}`);
     } catch (error) {
@@ -493,6 +494,7 @@
     } finally {
       unlistenProgress?.();
       unlistenLog?.();
+      exportingDialog?.close();
       exportDialog?.close();
     }
   }
@@ -598,7 +600,7 @@
     </div>
   </div>
 </main>
-<dialog id="tag-dialog" bind:this={tagDialog}>
+<dialog bind:this={tagDialog}>
   <div class="tag-dialog">
     <select bind:value={tagManageMode}>
       <option value="add">Add Tag</option>
@@ -625,7 +627,7 @@
   </div>
 </dialog>
 
-<dialog id="export-dialog" bind:this={exportDialog}>
+<dialog bind:this={exportDialog}>
   <div class="export-dialog">
     <div class="controls">
       <button onclick={selectExportPath}><Folder size="16"/></button>
@@ -640,11 +642,17 @@
         <option value="name">name</option>
       </select>
     </div>
-    <progress value={exportProgress} max="100" style="width: 100%"></progress>
     <div class=controls>
       <button onclick={() => exportDialog?.close()}>Close</button>
       <button onclick={exportRegions} style="margin-left: auto;" disabled={!exportPath || regionIds.length == 0}>Export</button>
     </div>
+  </div>
+</dialog>
+
+<dialog bind:this={exportingDialog}>
+  <div class="exporting-dialog">
+    <span>Exporting... Please wait.</span>
+    <progress value={exportProgress} max="100" style="width: 100%"></progress>
   </div>
 </dialog>
 
@@ -813,5 +821,11 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.exporting-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 250px;
 }
 </style>
