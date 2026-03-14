@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' 'unsafe-inline' http://stream.localhost; media-src 'self' http://stream.localhost blob:; img-src 'self' data: blob:"
     }
   },
   "bundle": {

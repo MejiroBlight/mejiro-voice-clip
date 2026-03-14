@@ -2,7 +2,6 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { open } from '@tauri-apps/plugin-dialog';
-  import { readFile } from '@tauri-apps/plugin-fs';
   import WaveSurfer from 'wavesurfer.js';
   import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
   import ZoomPlugin from 'wavesurfer.js/dist/plugins/zoom.esm.js';
@@ -42,6 +41,9 @@
   let exportPath: string | null = $state(null);
   let exportProgress = $state(0);
   let exportingDialog: HTMLDialogElement | null = $state(null);
+
+  const PEAKS_COUNT = 2000;
+  let peaksChunkUnlisten: (() => void) | null = null;
 
   $effect(() => {
     if (tagManageMode === "edit"){
@@ -198,6 +200,9 @@
   }
 
   async function initValues() {
+    // 進行中のピーク生成リスナーを解除
+    peaksChunkUnlisten?.();
+    peaksChunkUnlisten = null;
     fileName = "No file selected.";
     if (videoElement) {
       videoElement.src = "";
@@ -231,35 +236,80 @@
     await loadSourceFromPath(inputPath);
   }
 
+  // Tauri v2 のカスタムプロトコル URL はプラットフォームによって異なる
+  // Windows (WebView2): http://SCHEME.localhost/path
+  // macOS / Linux:      SCHEME://localhost/path
+  const isWindows = navigator.userAgent.toLowerCase().includes('windows nt');
+  const STREAM_BASE = isWindows
+    ? 'http://stream.localhost/video'
+    : 'stream://localhost/video';
+
+  // ファイルを切り替えるたびに新しい URL を生成してブラウザキャッシュを無効化する
+  let streamUrl = STREAM_BASE;
+
   async function loadSourceFromPath(path: string) {
     pushLog("Loading media...");
     try {
-      const bin = await readFile(path as string);
-      let arrayBuffer: ArrayBuffer;
-      if (bin === null) {
-        throw new Error('File data is null');
-      }
-      if (bin instanceof Uint8Array) {
-        arrayBuffer = bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength);
-      } else if (Array.isArray(bin)) {
-        arrayBuffer = new Uint8Array(bin as number[]).buffer;
-      } else if ((bin as any) instanceof ArrayBuffer) {
-        arrayBuffer = bin;
-      } else {
-        throw new Error('Unsupported file data type');
-      }
-      const ext = path.split('.').pop()?.toLowerCase() || '';
-      const isVid = ['mp4'].includes(ext);
-      const blob = new Blob([arrayBuffer], { type: isVid ? 'video/*' : 'audio/*' });
-      const url = URL.createObjectURL(blob);
-      if (videoElement) {
-        videoElement.src = url;
-        videoElement.load();
-      }else {
-        throw new Error('Video element not found');
-      }
-      wavesurfer?.load(url);
-      pushLog("Media loaded.");
+      await invoke('set_video_path', { path });
+      if (!videoElement) throw new Error('Video element not found');
+
+      // ファイルごとに異なる URL を生成してブラウザの Range キャッシュをリセット
+      streamUrl = `${STREAM_BASE}?v=${Date.now()}`;
+      const allPeaks = new Float32Array(PEAKS_COUNT);
+      let wavesurferReady = false;
+
+      // peaks-chunk イベントを先に購読してからピーク生成を開始する
+      peaksChunkUnlisten = await listen<{
+        peaks: number[];
+        offset: number;
+        total: number;
+        duration: number;
+        done: boolean;
+      }>('peaks-chunk', ({ payload }) => {
+        // チャンクをバッファへ書き込み
+        const end = Math.min(payload.offset + payload.peaks.length, allPeaks.length);
+        for (let i = payload.offset; i < end; i++) {
+          allPeaks[i] = payload.peaks[i - payload.offset];
+        }
+
+        if (wavesurferReady) {
+          // WaveSurfer の内部 AudioBuffer をインプレース更新 → メディア再読み込みなし
+          const w = wavesurfer as any;
+          if (w?.decodedData) {
+            w.decodedData.getChannelData(0).set(allPeaks);
+            w.renderer.render(w.decodedData);
+          }
+        }
+        // wavesurferReady == false の場合はチャンクが allPeaks に蓄積されるのみ。
+        // 後の wavesurfer.load() 呼び出し時にまとめて反映される。
+
+        if (payload.done) {
+          peaksChunkUnlisten?.();
+          peaksChunkUnlisten = null;
+          if (wavesurferReady) pushLog('Waveform complete.');
+        }
+      });
+
+      // バックグラウンドでピーク生成開始 (await しない)
+      invoke('generate_peaks', { path, peaksCount: PEAKS_COUNT })
+        .catch(e => pushLog(`Waveform error: ${e}`));
+
+      // 動画ソースをセットしてメタデータが届くのを待つ
+      videoElement.src = streamUrl;
+      const duration = await new Promise<number>(resolve => {
+        if (videoElement && isFinite(videoElement.duration) && videoElement.duration > 0) {
+          resolve(videoElement.duration);
+        } else {
+          videoElement!.addEventListener('loadedmetadata', () => {
+            resolve(videoElement!.duration);
+          }, { once: true });
+        }
+      });
+
+      // WaveSurfer を初期化 (蓄積済みピーク付き)
+      await wavesurfer?.load(streamUrl, [allPeaks], duration);
+      wavesurferReady = true;
+      pushLog(`Media loaded (${(duration / 60).toFixed(1)} min). Generating waveform...`);
     } catch (error) {
       console.error("Error loading media:", error);
       pushLog(`Error loading media: ${error}`);
@@ -443,9 +493,10 @@
       alert("Please select an export path.");
       return;
     }
-    const allRegions = regions.getRegions().filter(r => r.id !== 'start' && r.id !== 'temp');
     const nameCount = new Map<string, number>();
-    const exportData = allRegions.map((r, index) => {
+    const exportData = regionIds.map((id, index) => {
+      const r = regions?.getRegions().find(r => r.id === id);
+      if (!r) throw new Error("Region not found: " + id);
       const tag = tags.find(t => t.color === r.color);
       const tagName = tag ? tag.name : "";
       const name = r.content?.textContent ?? "";
@@ -522,7 +573,7 @@
     </div>
     <div class="controls">
       <button onclick={() => tempRegionStart()} title="Set temp start"><ArrowLeftToLine size="16"/></button>
-      <button onclick={() => tempRegionEnd} title="Set temp end"><ArrowRightToLine size="16"/></button>
+      <button onclick={() => tempRegionEnd()} title="Set temp end"><ArrowRightToLine size="16"/></button>
       <button onclick={() => playRegion("temp")} title="Play temp region"><Disc size="16"/></button>
       <button onclick={resetTempRegion} title="Reset temp region"><Trash2 size="16"/></button>
       <div class="tag-controls">
