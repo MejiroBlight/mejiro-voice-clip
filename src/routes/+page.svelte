@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { open } from '@tauri-apps/plugin-dialog';
+  import { readTextFile, writeTextFile, mkdir, BaseDirectory } from '@tauri-apps/plugin-fs';
   import WaveSurfer from 'wavesurfer.js';
   import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
   import ZoomPlugin from 'wavesurfer.js/dist/plugins/zoom.esm.js';
@@ -9,7 +10,7 @@
   import { onMount, untrack } from "svelte";
   import {
     FileDown, Play, Pause, StepBack, StepForward, SkipBack,
-    ArrowLeftToLine, ArrowRightToLine, Disc, Trash2, Tag, Folder
+    ArrowLeftToLine, ArrowRightToLine, Disc, Trash2, Tag, Folder, Keyboard
   } from "@lucide/svelte";
 
   type Tag = {
@@ -41,9 +42,48 @@
   let exportPath: string | null = $state(null);
   let exportProgress = $state(0);
   let exportingDialog: HTMLDialogElement | null = $state(null);
+  let shortcutDialog: HTMLDialogElement | null = $state(null);
 
   const PEAKS_COUNT = 2000;
   let peaksChunkUnlisten: (() => void) | null = null;
+
+  // === Shortcut System ===
+  const SHORTCUT_ACTIONS = [
+    { id: 'playPause'    as const, label: 'Play / Pause',               defaultKey: ' '          },
+    { id: 'stepBack'    as const, label: 'Step Back (-0.5s)',            defaultKey: 'arrowleft'  },
+    { id: 'stepForward' as const, label: 'Step Forward (+0.5s)',         defaultKey: 'arrowright' },
+    { id: 'jumpToStart' as const, label: 'Jump to Start Marker',        defaultKey: 'w'          },
+    { id: 'tempStart'   as const, label: 'Set Temp Start',              defaultKey: 'q'          },
+    { id: 'tempEnd'     as const, label: 'Set Temp End',                defaultKey: 'e'          },
+    { id: 'playTemp'    as const, label: 'Play Temp Region',            defaultKey: 's'          },
+    { id: 'resetTemp'   as const, label: 'Reset Temp Region',           defaultKey: 'r'          },
+    { id: 'addRegion'   as const, label: 'Add / Edit Region',           defaultKey: 'f'          },
+    { id: 'focusTag'    as const, label: 'Focus Tag Selector',          defaultKey: 'a'          },
+    { id: 'focusName'   as const, label: 'Focus Region Name Input',     defaultKey: 'd'          },
+  ] as const;
+
+  type ActionId = typeof SHORTCUT_ACTIONS[number]['id'];
+  type ShortcutConfig = Record<ActionId, string>;
+
+  const DEFAULT_SHORTCUTS: ShortcutConfig = Object.fromEntries(
+    SHORTCUT_ACTIONS.map(a => [a.id, a.defaultKey])
+  ) as ShortcutConfig;
+
+  let shortcuts: ShortcutConfig = $state({ ...DEFAULT_SHORTCUTS });
+  let rebindingId: ActionId | null = $state(null);
+  let tagSelectEl: HTMLSelectElement | null = $state(null);
+  let regionNameEl: HTMLInputElement | null = $state(null);
+
+  // 同じキーに複数のアクションが登録されているアクションIDのセット
+  let conflictIds = $derived((() => {
+    const keyCount = new Map<string, ActionId[]>();
+    for (const action of SHORTCUT_ACTIONS) {
+      const k = shortcuts[action.id];
+      if (!keyCount.has(k)) keyCount.set(k, []);
+      keyCount.get(k)!.push(action.id);
+    }
+    return new Set([...keyCount.values()].filter(ids => ids.length > 1).flat());
+  })());
 
   $effect(() => {
     if (tagManageMode === "edit"){
@@ -76,6 +116,100 @@
     editingTag = null;
     untrack(() => resetTempRegion());
   });
+
+  function tryCloseShortcutDialog() {
+    rebindingId = null;
+    if (conflictIds.size > 0) {
+      const names = [...conflictIds]
+        .map(id => SHORTCUT_ACTIONS.find(a => a.id === id)!.label)
+        .join('\n  ・ ');
+      alert(`キー競合があります。解消してから閉じてください：\n  ・ ${names}`);
+      return;
+    }
+    shortcutDialog?.close();
+  }
+
+  function keyLabel(k: string): string {
+    const MAP: Record<string, string> = {
+      ' ': 'Space', arrowleft: '←', arrowright: '→', arrowup: '↑', arrowdown: '↓',
+      escape: 'Esc', enter: 'Enter', backspace: 'BS', delete: 'Del', tab: 'Tab',
+    };
+    return MAP[k] ?? (k.length === 1 ? k.toUpperCase() : k);
+  }
+
+  async function loadShortcuts() {
+    try {
+      const json = await readTextFile('shortcuts.json', { baseDir: BaseDirectory.AppData });
+      const saved: Partial<ShortcutConfig> = JSON.parse(json);
+      shortcuts = { ...DEFAULT_SHORTCUTS, ...saved };
+      pushLog('Shortcuts loaded.');
+    } catch {
+      // File not found → use defaults
+    }
+  }
+
+  async function saveShortcuts() {
+    try {
+      // ディレクトリが存在しない場合（初回起動時）は先に作成する
+      await mkdir('.', { baseDir: BaseDirectory.AppData, recursive: true });
+      await writeTextFile('shortcuts.json', JSON.stringify(shortcuts, null, 2), { baseDir: BaseDirectory.AppData });
+    } catch (e) {
+      console.warn('Failed to save shortcuts:', e);
+    }
+  }
+
+  function dispatchAction(id: ActionId) {
+    switch (id) {
+      case 'playPause':    isPlaying ? wavesurfer?.pause() : wavesurfer?.play(); break;
+      case 'stepBack':     stepTime(-0.5); break;
+      case 'stepForward':  stepTime(0.5); break;
+      case 'jumpToStart':  playRegion('start'); break;
+      case 'tempStart':    tempRegionStart(); break;
+      case 'tempEnd':      tempRegionEnd(); break;
+      case 'playTemp':     playRegion('temp'); break;
+      case 'resetTemp':    resetTempRegion(); break;
+      case 'addRegion':    regionManageMode === 'edit' ? editRegion() : addRegion(); break;
+      case 'focusTag':     tagSelectEl?.focus(); break;
+      case 'focusName':    regionNameEl?.focus(); regionNameEl?.select(); break;
+    }
+  }
+
+  function handleKeyDown(ev: KeyboardEvent) {
+    if (ev.repeat) return;
+
+    if (rebindingId !== null) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const k = ev.key.toLowerCase();
+      if (k !== 'escape') {
+        // Warn if key already bound to another action
+        const conflict = SHORTCUT_ACTIONS.find(a => a.id !== rebindingId && shortcuts[a.id] === k);
+        if (conflict) pushLog(`[warn] Key "${keyLabel(k)}" already bound to "${conflict.label}". Overriding.`);
+        shortcuts = { ...shortcuts, [rebindingId]: k };
+        saveShortcuts();
+      }
+      rebindingId = null;
+      return;
+    }
+
+    const tag = (ev.target as HTMLElement)?.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
+      if (ev.key === 'Enter' || ev.key === 'Escape') {
+        ev.preventDefault();
+        (ev.target as HTMLElement).blur();
+      }
+      return;
+    }
+
+    const key = ev.key.toLowerCase();
+    for (const [id, bound] of Object.entries(shortcuts)) {
+      if (key === bound) {
+        ev.preventDefault();
+        dispatchAction(id as ActionId);
+        return;
+      }
+    }
+  }
 
   function setRegionHidden(regionId: string, hidden: boolean) {
     const r = regions?.getRegions().find(r => r.id === regionId);
@@ -132,6 +266,9 @@
   }
 
   onMount(() => {
+    loadShortcuts();
+    window.addEventListener('keydown', handleKeyDown);
+
     regions = RegionsPlugin.create();
     wavesurfer = WaveSurfer.create({
       container: '#waveform',
@@ -207,6 +344,7 @@
     if (videoElement) {
       videoElement.src = "";
     }
+    regions?.clearRegions();
     wavesurfer?.empty();
     isPlaying = false;
     editingRegionName = "";
@@ -578,7 +716,7 @@
       <button onclick={resetTempRegion} title="Reset temp region"><Trash2 size="16"/></button>
       <div class="tag-controls">
         <div class="box" style="background-color:{editingTag ? editingTag.color : undefined};"></div>
-        <select bind:value={editingTag}>
+        <select bind:value={editingTag} bind:this={tagSelectEl}>
           <option value={null}>None</option>
           {#each tags as tag}
             <option value={tag} style="background-color: {tag.color};">{tag.name}</option>
@@ -593,16 +731,19 @@
         }}><Tag size="16"/></button>
       </div>
     </div>
-    <input style="width: calc(100% - 16px);" type="text" title="Region name" placeholder="Region Name" bind:value={editingRegionName}/>
+    <input style="width: calc(100% - 16px);" type="text" title="Region name" placeholder="Region Name" bind:value={editingRegionName} bind:this={regionNameEl}/>
     {#if regionManageMode === "edit"}
-      <button onclick={editRegion} style="width: calc(100% - 8px)" title="Apply changes">
+      <button onclick={editRegion} style="width: calc(100% - 8px)" title="Apply changes" disabled={!selectedRegionId || editingRegionName == ""}>
         EditRegion
       </button>
     {:else}
-      <button onclick={addRegion} style="width: calc(100% - 8px)" title="Add region">
+      <button onclick={addRegion} style="width: calc(100% - 8px)" title="Add region" disabled={editingRegionName == ""}>
         AddRegion
       </button>
     {/if}
+    <div class="controls">
+      <button onclick={() => shortcutDialog?.showModal()} title="Keyboard Shortcuts"><Keyboard size="16"/></button>
+    </div>
   </div>
   <div class="right">
     <div class=regions>
@@ -704,6 +845,34 @@
   <div class="exporting-dialog">
     <span>Exporting... Please wait.</span>
     <progress value={exportProgress} max="100" style="width: 100%"></progress>
+  </div>
+</dialog>
+
+<dialog bind:this={shortcutDialog} oncancel={(e) => { e.preventDefault(); tryCloseShortcutDialog(); }}>
+  <div class="shortcut-dialog">
+    <h3>Keyboard Shortcuts</h3>
+    <div class="shortcut-list">
+      {#each SHORTCUT_ACTIONS as action}
+        <div class="shortcut-row" data-conflict={conflictIds.has(action.id)}>
+          <span class="shortcut-label">{action.label}</span>
+          <button
+            class="shortcut-key"
+            data-rebinding={rebindingId === action.id}
+            onclick={() => rebindingId = action.id}
+          >{rebindingId === action.id ? 'Press key...' : keyLabel(shortcuts[action.id])}</button>
+          <button
+            class="shortcut-reset"
+            title="Reset to default"
+            disabled={shortcuts[action.id] === action.defaultKey}
+            onclick={() => { shortcuts = { ...shortcuts, [action.id]: action.defaultKey }; saveShortcuts(); }}
+          >↩</button>
+        </div>
+      {/each}
+    </div>
+    <div class="controls" style="margin-top: 8px;">
+      <button onclick={() => { shortcuts = { ...DEFAULT_SHORTCUTS }; saveShortcuts(); }}>Reset All</button>
+      <button onclick={tryCloseShortcutDialog} style="margin-left: auto;" disabled={conflictIds.size > 0} title={conflictIds.size > 0 ? 'キー競合を解消してください' : ''}>Close</button>
+    </div>
   </div>
 </dialog>
 
@@ -878,5 +1047,47 @@
   flex-direction: column;
   gap: 8px;
   width: 250px;
+}
+.shortcut-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 360px;
+  & h3 { margin: 0 0 4px 0; }
+  & .shortcut-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  & .shortcut-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    &[data-conflict="true"] {
+      background: rgba(220, 38, 38, 0.12);
+      outline: 1px solid rgba(220, 38, 38, 0.5);
+      & .shortcut-label { color: #c00; font-weight: 600; }
+      & .shortcut-key { border-color: #c00; }
+    }
+  }
+  & .shortcut-key {
+    min-width: 96px;
+    font-family: monospace;
+    text-align: center;
+    &[data-rebinding="true"] {
+      background: #ffe0b2;
+      border-color: #ff9800;
+      animation: blink 0.8s step-start infinite;
+    }
+  }
+  & .shortcut-reset {
+    padding: 2px 6px;
+  }
+}
+@keyframes blink {
+  50% { opacity: 0.4; }
 }
 </style>
