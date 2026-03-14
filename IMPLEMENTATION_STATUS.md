@@ -9,12 +9,18 @@
   - ルートページ (`src/routes/+page.svelte`) にメディアファイルを選択して波形を表示する UI を実装。
     - WaveSurfer.js を使い、再生/一時停止、時間移動、波形表示、タイムライン、リージョン作成・管理が可能。
     - 選択したファイルは `@tauri-apps/plugin-fs` の `readFile` で読み込み、Blob URL として WaveSurfer に渡して再生する。
+  - リージョン管理機能
+    - 一時リージョンの作成（開始/終了位置設定）と正式リージョンの追加
+    - リージョン一覧表示、選択（`selectedRegionId`）による編集モード切り替え
+    - 選択中リージョンを一時的に非表示にする機能（`display: none` で隠す）
+    - リージョンにタグ（色 + 名前）を付与し、タグ色に応じた色付けが可能
+    - リージョン上にホバーしたときだけラベルを表示する UI（`mouseenter`/`mouseleave` で opacity を切り替え）
   - タグ管理機能（タグの追加・編集・色指定）を実装し、リージョンに色を割り当てる仕組みを含む。
-  - `<dialog>` を用いたタグ管理モーダルを実装し、クリックで閉じる挙動などの UI 動作を実装。
-  - 一部で `@tauri-apps/api/core` の `invoke` も利用可能な状態（Rust 側コマンド呼び出し対応）を残したままになっている。
+  - `<dialog>` を用いたタグ管理モーダル、エクスポート設定モーダル（出力先選択・ファイル名ルール選択）を実装。
+  - エクスポートボタンが `invoke('export_regions', ...)` を呼び出すコードを実装（ただし Rust 側のコマンドは未実装）。
+  - `@tauri-apps/api/core` の `invoke` を使った Rust 側コマンド呼び出しが可能な状態。
 - **バックエンド（Rust）**
-  - `src-tauri/src/lib.rs` に `greet(name: &str) -> String` コマンドが実装されている。
-  - `src-tauri/src/lib.rs` に `extract_audio_from_video(input_path: String) -> String` コマンドを追加し、Symphonia で MP4 から音声トラックを抽出して WAV を出力する機能を試験的に実装。
+  - `src-tauri/src/lib.rs` に `extract_audio_from_video(input_path: String) -> String` コマンドを実装し、Symphonia で MP4 から音声トラックを抽出して WAV を出力する機能を試験的に実装。
   - AAC が `malformed stream: aac: invalid data` になる場合に備えて、`symphonia-adapter-fdk-aac` を導入し、AAC 時は FDK AAC デコーダを使うようフォールバック実装を追加。
   - `tauri-plugin-dialog` を使ってファイルダイアログで MP4 を選択できるようにした。
   - `src-tauri/src/main.rs` から `mejiro_voice_clip_lib::run()` を実行し、Tauri アプリを起動する構成。
@@ -23,10 +29,11 @@
 
 ## ❌ 未実装/未完了（今後要対応）
 
-- 音声クリップ（voice clip）に関する機能は未実装。
-  - 音声録音・再生・ファイル保存などの機能はまだ存在しない。
-  - UI/UX の要件（録音ボタン、タイムライン、ファイル管理など）は定義されていない。
-- データ管理・設定（例：アプリ設定、ユーザー設定、保存先パスなど）は未実装。
+- 音声クリップ（voice clip）として完成させるための機能が未完了。
+  - 録音機能（マイク入力の録音・停止・保存）やファイル管理機能は未実装。
+  - オーディオクリップのエクスポート（リージョンごとの音声出力）を実現する Rust 側コマンド `export_regions` が未実装。フロントエンドからは呼び出すコードが存在するが、バックエンド側が実装されていないため実行できない。
+  - クリップを導出するためのファイル命名・ディレクトリ管理の仕様・UI が未定。
+- データ管理・設定（例：アプリ設定、ユーザー設定、保存先パスの永続化など）は未実装。
 - テスト（ユニットテスト/統合テスト）は未実装。
 
 ---

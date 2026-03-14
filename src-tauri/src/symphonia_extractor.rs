@@ -11,9 +11,23 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::default::{get_codecs, get_probe};
+use serde::Deserialize;
 use symphonia_adapter_fdk_aac::AacDecoder;
 
-pub fn extract_audio_to_wav(input: &Path, output: &Path) -> anyhow::Result<()> {
+#[derive(Debug, Clone, Deserialize)]
+pub struct Region {
+    pub name: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+pub struct DecodedAudio {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub samples: Vec<i16>,
+}
+
+pub fn decode(input: &Path) -> anyhow::Result<DecodedAudio> {
     let file = File::open(input).context("opening input file")?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -56,13 +70,6 @@ pub fn extract_audio_to_wav(input: &Path, output: &Path) -> anyhow::Result<()> {
         .map(|c| c.count() as u16)
         .unwrap_or(2);
 
-    let spec = WavSpec {
-        channels,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
-    };
-
     // Decode all packets into a single sample buffer (i16) first.
     let mut all_samples = Vec::<i16>::new();
 
@@ -93,22 +100,36 @@ pub fn extract_audio_to_wav(input: &Path, output: &Path) -> anyhow::Result<()> {
 
         all_samples.extend_from_slice(sample_buf.samples());
     }
+    return Ok(DecodedAudio { sample_rate, channels, samples: all_samples.clone() });
+}
 
-    // Split into two halves.
-    let half = all_samples.len() / 2;
-    let (first, second) = all_samples.split_at(half);
+pub fn extract(data: &DecodedAudio, output: &Path, region: Region) -> anyhow::Result<()> {
+    let total_frames = data.samples.len() / data.channels as usize;
+    let sample_rate = data.sample_rate;
+    let channels = data.channels;
+    let out_dir = output.parent().unwrap_or_else(|| Path::new("."));
+    let start_frame = (region.start * sample_rate as f64).round() as usize;
+    let end_frame = (region.end * sample_rate as f64).round() as usize;
+    let start = start_frame.min(total_frames) * channels as usize;
+    let end = end_frame.min(total_frames) * channels as usize;
+    let slice = &data.samples[start..end];
 
-    let stem = output
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    let dir = output.parent().unwrap_or_else(|| Path::new("."));
+    let mut file_name = region.name.clone();
+    if !file_name.to_lowercase().ends_with(".wav") {
+        file_name.push_str(".wav");
+    }
+    let out_path = out_dir.join(file_name);
 
-    let out1 = dir.join(format!("{}_part1.wav", stem));
-    let out2 = dir.join(format!("{}_part2.wav", stem));
-
-    write_wav(&out1, spec, first)?;
-    write_wav(&out2, spec, second)?;
+    write_wav(
+        &out_path,
+        WavSpec {
+            channels: channels as u16,
+            sample_rate: sample_rate as u32,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        },
+        slice,
+    )?;
 
     Ok(())
 }

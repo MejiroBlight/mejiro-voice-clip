@@ -1,30 +1,53 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use tauri::AppHandle;
-use tauri_plugin_dialog::DialogExt;
+use tauri::{AppHandle, Emitter};
 
 mod symphonia_extractor;
-use symphonia_extractor::extract_audio_to_wav;
+use symphonia_extractor::{Region, decode, extract};
 
 #[tauri::command]
-fn extract_audio_from_video(input_path: String) -> Result<String, String> {
+fn export_regions(
+    app: AppHandle,
+    input_path: String,
+    out_dir: String,
+    regions: Vec<Region>,
+) -> Result<(), String> {
     let input_path = Path::new(&input_path);
-
     if !input_path.exists() {
-        return Err(format!(
-            "input file does not exist: {}",
-            input_path.display()
-        ));
+        return Err(format!("input file does not exist: {}", input_path.display()));
     }
 
-    let output_path = input_path.with_extension("wav");
-
-    // First try Symphonia-based extraction.
-    match extract_audio_to_wav(input_path, &output_path) {
-        Ok(()) => Ok(output_path.to_string_lossy().to_string()),
-        Err(sym_err) => Err(format!("failed to extract audio with Symphonia: {sym_err}")),
+    let out_dir = PathBuf::from(out_dir);
+    if !out_dir.exists() {
+        std::fs::create_dir_all(&out_dir)
+            .map_err(|e| format!("failed to create output directory: {e}"))?;
     }
+
+    let _ = app.emit("export-log", "Decoding input file...");
+    let decoded = decode(input_path).map_err(|e| format!("decode error: {e}"))?;
+    let _ = app.emit("export-log", "Decode complete.");
+
+    let total = regions.len();
+    for (idx, region) in regions.into_iter().enumerate() {
+        // Send progress before processing each region
+        let progress = ((idx) as f64 / total.max(1) as f64) * 100.0;
+        let _ = app.emit("export-progress", progress);
+
+        let msg = format!("Exporting region: {} ({}->{})", region.name, region.start, region.end);
+        let _ = app.emit("export-log", msg);
+
+        let out_path = out_dir.join(&region.name);
+        extract(&decoded, &out_path, region.clone())
+            .map_err(|e| format!("failed to export region: {e}"))?;
+
+        let _ = app.emit("export-log", format!("Finished: {}", region.name));
+    }
+
+    // Final progress = 100%
+    let _ = app.emit("export-progress", 100.0);
+
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -33,7 +56,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![extract_audio_from_video])
+        .invoke_handler(tauri::generate_handler![export_regions])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -1,15 +1,16 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { open } from '@tauri-apps/plugin-dialog';
   import { readFile } from '@tauri-apps/plugin-fs';
   import WaveSurfer from 'wavesurfer.js';
   import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
   import ZoomPlugin from 'wavesurfer.js/dist/plugins/zoom.esm.js';
   import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js'
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import {
     FileDown, Play, Pause, StepBack, StepForward, SkipBack,
-    ArrowLeftToLine, ArrowRightToLine, Disc, Trash2, Tag
+    ArrowLeftToLine, ArrowRightToLine, Disc, Trash2, Tag, Folder
   } from "@lucide/svelte";
 
   type Tag = {
@@ -18,6 +19,7 @@
   };
 
   let fileName = $state("No file selected");
+  let inputPath: string | null = $state(null);
   let videoElement: HTMLVideoElement | null = $state(null);
   let regions: RegionsPlugin | null = $state(null);
   let wavesurfer = $state<WaveSurfer>();
@@ -35,9 +37,14 @@
   let selectedRegionId: string | null = $state(null);
   let logs: string[] = $state([]);
   let logPanelBody: HTMLDivElement | null = $state(null);
+  let exportDialog: HTMLDialogElement | null = $state(null);
+  let exportMode: "index_tag_name" | "tag_name" | "start_tag_name" | "name" = $state("index_tag_name");
+  let exportPath: string | null = $state(null);
+  let exportProgress = $state(0);
 
   $effect(() => {
-    if (tagManageMode === "edit" && selectedTag) {
+    if (tagManageMode === "edit"){
+      if (!selectedTag) return;
       newTagName = selectedTag.name;
       newTagColor = rgbaToHex(selectedTag.color);
     } else {
@@ -48,18 +55,34 @@
   });
 
   $effect(() => {
-    if (regionManageMode === "edit" && selectedRegionId && regions) {
-      const r = regions.getRegions().find(r => r.id === selectedRegionId);
-      if (r) {
+    untrack(() => regionIds.forEach(id => setRegionHidden(id, false)));
+    if (selectedRegionId){
+      const r = regions?.getRegions().find(r => r.id === selectedRegionId);
+      if (r){
         editingRegionName = r.content?.textContent || "";
         editingTag = tags.find(t => t.color === r.color) || null;
+        setRegionHidden(r.id, true);
+        untrack(() => {
+          tempRegionStart(r.start);
+          tempRegionEnd(r.end);
+        });
+        return;
       }
-    } else {
-      editingRegionName = "";
-      editingTag = null;
-      selectedRegionId = null;
     }
+    editingRegionName = "";
+    editingTag = null;
+    untrack(() => resetTempRegion());
   });
+
+  function setRegionHidden(regionId: string, hidden: boolean) {
+    const r = regions?.getRegions().find(r => r.id === regionId);
+    if (!r || !r.element) return;
+    if (hidden) {
+      r.element.style.display = "none";
+    } else {
+      r.element.style.display = "";
+    }
+  }
 
   const randomColor = () => {
     const letters = '0123456789ABCDEF';
@@ -145,8 +168,23 @@
     wavesurfer.on('pause', () => {
       isPlaying = false;
     });
-    regions.on('region-created', () => updateRegionIds());
-    regions.on('region-updated', () => updateRegionIds());
+    regions.on('region-created', (region) => {
+      updateRegionIds();
+      if (!region.element) return;
+      const label = region.element.querySelector('[part="region-content"]') as HTMLElement | null;
+      if (!label) return;
+
+      label.style.opacity = '0';
+      label.style.transition = 'opacity 0.14s ease';
+      label.style.textWrap = 'nowrap';
+
+      region.element.addEventListener('mouseenter', () => {
+        label.style.opacity = '1';
+      });
+      region.element.addEventListener('mouseleave', () => {
+        label.style.opacity = '0';
+      });
+    });
     regions.on('region-removed', () => updateRegionIds());
   });
 
@@ -167,22 +205,26 @@
     isPlaying = false;
     editingRegionName = "";
     tags = [];
+    editingTag = null;
+    regionManageMode = "add";
+    selectedRegionId = null;
   }
 
   async function openFile(){
     initValues();
-    const inputPath = await open({
+    const input = await open({
       title: "Select an Video or Audio file",
       filters: [
         { name: "Video/Audio", extensions: ["mp4", "mp3", "wav"] },
       ],
       multiple: false,
     });
-    if (!inputPath) {
+    if (!input) {
       fileName = "No file selected.";
       pushLog("File selection cancelled.");
       return;
     }
+    inputPath = input as string;
     fileName = inputPath.split(/[\\/]/).pop() || fileName;
     pushLog(`Selected file: ${fileName}`);
     await loadSourceFromPath(inputPath);
@@ -230,10 +272,10 @@
     wavesurfer.seekTo(newTime / wavesurfer.getDuration());
   }
 
-  function tempRegionStart(){
+  function tempRegionStart(time?: number) {
     if (!wavesurfer || !regions) return;
     let tempRegion = regions.getRegions().find(r => r.id === 'temp');
-    const start = wavesurfer.getCurrentTime();
+    const start = time || wavesurfer.getCurrentTime();
     if (!tempRegion) {
       tempRegion = regions.addRegion({
         id: 'temp',
@@ -253,11 +295,11 @@
     }
   }
 
-  function tempRegionEnd(){
+  function tempRegionEnd(time?: number) {
     if (!wavesurfer || !regions) return;
     const tempRegion = regions.getRegions().find(r => r.id === 'temp');
     if (!tempRegion) return;
-    const end = wavesurfer.getCurrentTime();
+    const end = time || wavesurfer.getCurrentTime();
     if (end > tempRegion.start) {
       tempRegion.setOptions({ end });
       pushLog(`Temp region end set to ${end.toFixed(2)}s`);
@@ -265,9 +307,9 @@
   }
 
   function addRegion() {
-    if (!wavesurfer || !regions || editingRegionName == "") return;
+    if (!wavesurfer || !regions || editingRegionName == "") return false;
     const tempRegion = regions.getRegions().find(r => r.id === 'temp');
-    if (!tempRegion) return;
+    if (!tempRegion) return false;
     const color = editingTag ? editingTag.color : getCssProp('--default-region-color');
     regions.addRegion({
       start: tempRegion.start,
@@ -279,17 +321,36 @@
     });
     pushLog(`Added region "${editingRegionName}" (${tempRegion.start.toFixed(2)}s - ${tempRegion.end?.toFixed(2)}s)`);
     resetTempRegion();
+    return true;
+  }
+
+  function editRegion() {
+    if (!wavesurfer || !regions || editingRegionName == "") return;
+    const r = regions.getRegions().find(r => r.id === selectedRegionId);
+    if (!r || !addRegion()) return;
+    r.remove();
   }
 
   function playRegion(id: string) {
     if (!wavesurfer || !regions) return;
     const region = regions.getRegions().find(r => r.id === id);
     if (!region) return;
-    pushLog(`Playing region ${id} (${region.start.toFixed(2)}s - ${region.end?.toFixed(2) ?? 'end'}s)`);
-    if (!region.end) {
+    if (region.end - region.start <= 0.1) {
       wavesurfer.play(region.start);
     }else{
       wavesurfer.play(region.start, region.end);
+    }
+  }
+
+  function removeRegion(id: string) {
+    if (!regions) return;
+    const r = regions.getRegions().find(r => r.id === id);
+    if (r) {
+      r.remove();
+      pushLog(`Removed region "${r.content?.textContent ?? "Unnamed"}" (${r.start.toFixed(2)}s - ${r.end?.toFixed(2)}s)`);
+      if (selectedRegionId === id) {
+        selectedRegionId = null;
+      }
     }
   }
 
@@ -301,6 +362,7 @@
       pushLog('Temp region reset');
     }
     editingRegionName = "";
+    selectedRegionId = null;
   }
 
   function manageTag(){
@@ -352,6 +414,88 @@
     }
     pushLog(`Replaced tag colors: ${oldTag.name} -> ${newTag?.name ?? 'default'}`);
   }
+
+  async function selectExportPath() {
+    const path = await open({
+      title: "Export directory",
+      directory: true,
+      multiple: false
+    });
+    if (path) {
+      pushLog(`Selected export path: ${path}`);
+      exportPath = path as string;
+    } else {
+      pushLog("Export path selection cancelled.");
+    }
+  }
+
+  async function exportRegions() {
+    if (!regions || regionIds.length === 0) {
+      alert("No regions to export.");
+      return;
+    }
+    if (!inputPath) {
+      alert("No input file selected.");
+      return;
+    }
+    if (!exportPath) {
+      alert("Please select an export path.");
+      return;
+    }
+    const allRegions = regions.getRegions().filter(r => r.id !== 'start' && r.id !== 'temp');
+    const nameCount = new Map<string, number>();
+    const exportData = allRegions.map((r, index) => {
+      const tag = tags.find(t => t.color === r.color);
+      const tagName = tag ? tag.name : "";
+      const name = r.content?.textContent ?? "";
+      let fileName = "";
+      switch (exportMode) {
+        case "index_tag_name":
+          fileName = `${index + 1}_${tagName}_${name}`;
+          break;
+        case "tag_name":
+          fileName = `${tagName}_${name}`;
+          break;
+        case "start_tag_name":
+          fileName = `${r.start.toFixed(2)}_${tagName}_${name}`;
+          break;
+        case "name":
+          fileName = name;
+          break;
+      }
+      const baseName = fileName;
+      const count = (nameCount.get(baseName) ?? 0) + 1;
+      nameCount.set(baseName, count);
+      if (count > 1) {
+        fileName = `${baseName}_${count}`;
+      }
+      return {
+        name: fileName,
+        start: r.start,
+        end: r.end
+      };
+    });
+    let unlistenProgress: (() => void) | null = null;
+    let unlistenLog: (() => void) | null = null;
+    try {
+      unlistenProgress = await listen<number>("export-progress", (event) => {
+        exportProgress = event.payload;
+      });
+      unlistenLog = await listen<string>("export-log", (event) => {
+        pushLog(event.payload);
+      });
+
+      await invoke('export_regions', { inputPath, outDir: exportPath, regions: exportData });
+      pushLog(`Exported ${exportData.length} regions to ${exportPath}`);
+    } catch (error) {
+      console.error("Error exporting regions:", error);
+      pushLog(`Error exporting regions: ${error}`);
+    } finally {
+      unlistenProgress?.();
+      unlistenLog?.();
+      exportDialog?.close();
+    }
+  }
 </script>
 
 <main class="container">
@@ -372,11 +516,11 @@
       </button>
       <button onclick={() => stepTime(-0.5)} title="Move -0.5s"><StepBack size="16"/></button>
       <button onclick={() => stepTime(0.5)} title="Move +0.5s"><StepForward size="16"/></button>
-      <button title="Jump to start marker"><SkipBack size="16"/></button>
+      <button onclick={() => playRegion("start")} title="Jump to start marker"><SkipBack size="16"/></button>
     </div>
     <div class="controls">
-      <button onclick={tempRegionStart} title="Set temp start"><ArrowLeftToLine size="16"/></button>
-      <button onclick={tempRegionEnd} title="Set temp end"><ArrowRightToLine size="16"/></button>
+      <button onclick={() => tempRegionStart()} title="Set temp start"><ArrowLeftToLine size="16"/></button>
+      <button onclick={() => tempRegionEnd} title="Set temp end"><ArrowRightToLine size="16"/></button>
       <button onclick={() => playRegion("temp")} title="Play temp region"><Disc size="16"/></button>
       <button onclick={resetTempRegion} title="Reset temp region"><Trash2 size="16"/></button>
       <div class="tag-controls">
@@ -384,7 +528,7 @@
         <select bind:value={editingTag}>
           <option value={null}>None</option>
           {#each tags as tag}
-            <option value={tag}>{tag.name}</option>
+            <option value={tag} style="background-color: {tag.color};">{tag.name}</option>
           {/each}
         </select>
         <button onclick={() => {
@@ -394,22 +538,34 @@
             tagManageMode = "add";
           }
         }}><Tag size="16"/></button>
-        
       </div>
-      
     </div>
     <input style="width: calc(100% - 16px);" type="text" title="Region name" placeholder="Region Name" bind:value={editingRegionName}/>
-    <button onclick={addRegion} style="width: calc(100% - 8px)" title="Add region">
-      AddRegion
-    </button>
+    {#if regionManageMode === "edit"}
+      <button onclick={editRegion} style="width: calc(100% - 8px)" title="Apply changes">
+        EditRegion
+      </button>
+    {:else}
+      <button onclick={addRegion} style="width: calc(100% - 8px)" title="Add region">
+        AddRegion
+      </button>
+    {/if}
   </div>
   <div class="right">
     <div class=regions>
       <div class=controls>
-        <select bind:value={regionManageMode}>
+        <select bind:value={regionManageMode} onchange={() => selectedRegionId = null}>
           <option value="add">Add Region</option>
           <option value="edit">Edit Region</option>
         </select>
+        <button onclick={() =>{
+          if (exportDialog) {
+            exportDialog.showModal();
+            exportProgress = 0;
+          }
+        }}>
+          Export All
+        </button>
       </div>
       <div class="list">
         {#each regionIds as id}
@@ -423,9 +579,11 @@
               }
             }
           }}>
-            <Play size="16"/>
+            <Play size="16" onclick={() => r && playRegion(r.id)}/>
             <div class="box" style="background-color:{r?.color ?? undefined}"></div>
             <span>{r?.content?.textContent ?? "Unnamed"}</span>
+            <span>{r?.start.toFixed(2) + "~" + r?.end.toFixed(2)}</span>
+            <Trash2 size="16" onclick={() => {r && removeRegion(r.id)}}/>
           </button>
         {/each}
       </div>
@@ -464,6 +622,29 @@
       {/each}
     </div>
     <button onclick={() => tagDialog?.close()}>Apply</button>
+  </div>
+</dialog>
+
+<dialog id="export-dialog" bind:this={exportDialog}>
+  <div class="export-dialog">
+    <div class="controls">
+      <button onclick={selectExportPath}><Folder size="16"/></button>
+      <span class="file-name">{exportPath ?? "chose export path"}</span>
+    </div>
+    <div class=controls>
+      ExportName: 
+      <select bind:value={exportMode}>
+        <option value="index_tag_name">index_tag_name</option>
+        <option value="tag_name">tag_name</option>
+        <option value="start_tag_name">start_tag_name</option>
+        <option value="name">name</option>
+      </select>
+    </div>
+    <progress value={exportProgress} max="100" style="width: 100%"></progress>
+    <div class=controls>
+      <button onclick={() => exportDialog?.close()}>Close</button>
+      <button onclick={exportRegions} style="margin-left: auto;" disabled={!exportPath || regionIds.length == 0}>Export</button>
+    </div>
   </div>
 </dialog>
 
@@ -576,7 +757,17 @@
   display: flex;
   flex-direction: column;
   & .controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     padding: 4px 0;
+    & button {
+      margin-left: auto;
+    }
+  }
+  & .list .panel{
+      display: grid;
+      grid-template-columns: auto auto 1fr auto auto;
   }
 }
 
@@ -616,5 +807,11 @@
     max-height: 200px;
     width: 250px;
   }
+}
+.export-dialog {
+  width : 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 </style>
