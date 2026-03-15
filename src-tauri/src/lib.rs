@@ -7,8 +7,8 @@ use std::sync::{
 
 use tauri::{AppHandle, Emitter, State};
 
-mod symphonia_extractor;
-use symphonia_extractor::{Region, extract_region};
+mod ffmpeg_extractor;
+use ffmpeg_extractor::Region;
 
 // ---- 共有状態 ---------------------------------------------------------------
 
@@ -21,6 +21,10 @@ struct VideoState(SharedVideoPath);
 /// 進行中のピーク生成タスクにキャンセルを伝えるフラグ。
 /// 新しい生成が始まるのたびに旧フラグを true にして上書きする。
 struct PeakCancelState(Mutex<Arc<AtomicBool>>);
+
+/// 使用する ffmpeg バイナリのパス。
+/// "ffmpeg" のままならシステム PATH から解決される。
+struct FfmpegState(Mutex<Option<PathBuf>>);
 
 // ---- コマンド ----------------------------------------------------------------
 
@@ -51,12 +55,92 @@ struct PeaksChunkPayload {
     done: bool,
 }
 
-/// フロントから呼ばれる: ファイルを symphonia でデコードしピークをチャンク単位でイベント送信する。
-/// 新しい呼び出しがあると波形を辺失する前の切り替えを防ぐため、前のタスクをキャンセルする。
+/// ffmpeg が利用可能かチェックし、FfmpegState にパスをセットする。
+/// 戻り値: "system" / "sidecar" / "not_found"
+#[tauri::command]
+fn check_ffmpeg(state: State<FfmpegState>) -> Result<String, String> {
+    // システム PATH にある ffmpeg を試す
+    if ffmpeg_extractor::probe_ffmpeg(Path::new("ffmpeg")) {
+        let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+        *guard = Some(PathBuf::from("ffmpeg"));
+        return Ok("system".to_string());
+    }
+
+    // ffmpeg-sidecar がダウンロード済みのバイナリを試す
+    let sidecar = ffmpeg_sidecar::paths::ffmpeg_path();
+    if sidecar.exists() && ffmpeg_extractor::probe_ffmpeg(&sidecar) {
+        let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+        *guard = Some(sidecar);
+        return Ok("sidecar".to_string());
+    }
+
+    Ok("not_found".to_string())
+}
+
+/// ユーザーが指定したパスの ffmpeg を登録する。
+#[tauri::command]
+fn set_ffmpeg_path(state: State<FfmpegState>, path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !ffmpeg_extractor::probe_ffmpeg(&p) {
+        return Err(format!("指定パスの ffmpeg が動作しません: {}", path));
+    }
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    *guard = Some(p);
+    Ok(())
+}
+
+/// ffmpeg-sidecar を使って ffmpeg を自動ダウンロードし、FfmpegState に登録する。
+/// ダウンロード進捗は "ffmpeg-download-progress" イベントで通知する。
+#[tauri::command]
+async fn download_ffmpeg(app: AppHandle, state: State<'_, FfmpegState>) -> Result<(), String> {
+    use ffmpeg_sidecar::download::{auto_download_with_progress, FfmpegDownloadProgressEvent};
+
+    tauri::async_runtime::spawn_blocking(move || {
+        auto_download_with_progress(|event| {
+            let payload = match event {
+                FfmpegDownloadProgressEvent::Starting => {
+                    serde_json::json!({ "status": "starting", "pct": 0 })
+                }
+                FfmpegDownloadProgressEvent::Downloading { total_bytes, downloaded_bytes } => {
+                    let pct = if total_bytes > 0 {
+                        (downloaded_bytes as f64 / total_bytes as f64 * 100.0) as u32
+                    } else {
+                        0
+                    };
+                    serde_json::json!({
+                        "status": "downloading",
+                        "pct": pct,
+                        "downloaded": downloaded_bytes,
+                        "total": total_bytes
+                    })
+                }
+                FfmpegDownloadProgressEvent::UnpackingArchive => {
+                    serde_json::json!({ "status": "unpacking", "pct": 99 })
+                }
+                FfmpegDownloadProgressEvent::Done => {
+                    serde_json::json!({ "status": "done", "pct": 100 })
+                }
+            };
+            let _ = app.emit("ffmpeg-download-progress", payload);
+        })
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let path = ffmpeg_sidecar::paths::ffmpeg_path();
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    *guard = Some(path);
+    Ok(())
+}
+
+/// フロントから呼ばれる: ファイルを ffmpeg でデコードしピークをチャンク単位でイベント送信する。
+/// 新しい呼び出しがあると波形を切り替える前の処理をキャンセルする。
 #[tauri::command]
 async fn generate_peaks(
     app: AppHandle,
     cancel_state: State<'_, PeakCancelState>,
+    ffmpeg_state: State<'_, FfmpegState>,
     path: String,
     peaks_count: usize,
 ) -> Result<(), String> {
@@ -74,8 +158,14 @@ async fn generate_peaks(
         new_flag
     };
 
+    let ffmpeg = {
+        let guard = ffmpeg_state.0.lock().map_err(|e| e.to_string())?;
+        guard.clone().ok_or_else(|| "ffmpeg が設定されていません".to_string())?
+    };
+
     tauri::async_runtime::spawn_blocking(move || {
-        symphonia_extractor::generate_peaks_streaming(
+        ffmpeg_extractor::generate_peaks_streaming(
+            &ffmpeg,
             &p,
             peaks_count,
             60.0,
@@ -93,15 +183,19 @@ async fn generate_peaks(
     .map_err(|e| e.to_string())?
 }
 
-/// 既存コマンド: リージョンを WAV としてエクスポートする。
-/// リージョンごとに必要な範囲のみシーク・デコードするためメモリ効率がよい。
+/// リージョンを WAV としてエクスポートする。
 #[tauri::command]
 fn export_regions(
     app: AppHandle,
+    ffmpeg_state: State<FfmpegState>,
     input_path: String,
     out_dir: String,
     regions: Vec<Region>,
 ) -> Result<(), String> {
+    let ffmpeg = {
+        let guard = ffmpeg_state.0.lock().map_err(|e| e.to_string())?;
+        guard.clone().ok_or_else(|| "ffmpeg が設定されていません".to_string())?
+    };
     let input_path = PathBuf::from(&input_path);
     if !input_path.exists() {
         return Err(format!("input file does not exist: {}", input_path.display()));
@@ -124,8 +218,7 @@ fn export_regions(
         );
         let _ = app.emit("export-log", msg);
 
-        let out_path = out_dir.join(&region.name);
-        extract_region(&input_path, &out_path, region.clone())
+        ffmpeg_extractor::extract_region(&ffmpeg, &input_path, &out_dir, &region)
             .map_err(|e| format!("failed to export region: {e}"))?;
 
         let _ = app.emit("export-log", format!("Finished: {}", region.name));
@@ -175,6 +268,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(VideoState(video_path))
         .manage(PeakCancelState(Mutex::new(Arc::new(AtomicBool::new(false)))))
+        .manage(FfmpegState(Mutex::new(None)))
         // --------------------------------------------------------------
         // stream://localhost/video → 登録済みファイルを Range 対応で配信
         // --------------------------------------------------------------
@@ -283,6 +377,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             set_video_path,
+            check_ffmpeg,
+            set_ffmpeg_path,
+            download_ffmpeg,
             generate_peaks,
             export_regions
         ])

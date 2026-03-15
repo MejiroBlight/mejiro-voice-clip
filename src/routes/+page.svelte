@@ -43,6 +43,11 @@
   let exportProgress = $state(0);
   let exportingDialog: HTMLDialogElement | null = $state(null);
   let shortcutDialog: HTMLDialogElement | null = $state(null);
+  let ffmpegDialog: HTMLDialogElement | null = $state(null);
+  let ffmpegDownloading = $state(false);
+  let ffmpegDownloadError = $state("");
+  let ffmpegDownloadPct = $state(0);
+  let ffmpegDownloadStatus = $state(""); // 'downloading' | 'unpacking' | ''
 
   const PEAKS_COUNT = 2000;
   let peaksChunkUnlisten: (() => void) | null = null;
@@ -267,6 +272,13 @@
 
   onMount(() => {
     loadShortcuts();
+
+    // ffmpeg が利用可能か確認する。なければセットアップダイアログを表示する
+    invoke<string>('check_ffmpeg').then(status => {
+      if (status === 'not_found') ffmpegDialog?.showModal();
+      else pushLog(`ffmpeg: ${status}`);
+    }).catch(e => pushLog(`ffmpeg check error: ${e}`));
+
     window.addEventListener('keydown', handleKeyDown);
 
     regions = RegionsPlugin.create();
@@ -618,6 +630,47 @@
     }
   }
 
+  async function browseFfmpeg() {
+    const selected = await open({
+      title: 'ffmpeg の実行ファイルを選択',
+      filters: [{ name: 'ffmpeg', extensions: ['exe', '*'] }],
+      multiple: false,
+    });
+    if (!selected) return;
+    try {
+      await invoke('set_ffmpeg_path', { path: selected as string });
+      pushLog(`ffmpeg を登録しました: ${selected}`);
+      ffmpegDialog?.close();
+    } catch (e) {
+      ffmpegDownloadError = `パスが無効です: ${e}`;
+    }
+  }
+
+  async function autoDownloadFfmpeg() {
+    ffmpegDownloading = true;
+    ffmpegDownloadError = '';
+    ffmpegDownloadPct = 0;
+    ffmpegDownloadStatus = '';
+
+    const unlisten = await listen<{
+      status: string; pct: number; downloaded?: number; total?: number;
+    }>('ffmpeg-download-progress', ({ payload }) => {
+      ffmpegDownloadPct = payload.pct;
+      ffmpegDownloadStatus = payload.status;
+    });
+
+    try {
+      await invoke('download_ffmpeg');
+      pushLog('ffmpeg のダウンロードが完了しました');
+      ffmpegDialog?.close();
+    } catch (e) {
+      ffmpegDownloadError = `ダウンロード失敗: ${e}`;
+    } finally {
+      unlisten();
+      ffmpegDownloading = false;
+    }
+  }
+
   async function exportRegions() {
     if (!regions || regionIds.length === 0) {
       alert("No regions to export.");
@@ -873,6 +926,33 @@
       <button onclick={() => { shortcuts = { ...DEFAULT_SHORTCUTS }; saveShortcuts(); }}>Reset All</button>
       <button onclick={tryCloseShortcutDialog} style="margin-left: auto;" disabled={conflictIds.size > 0} title={conflictIds.size > 0 ? 'キー競合を解消してください' : ''}>Close</button>
     </div>
+  </div>
+</dialog>
+
+<dialog bind:this={ffmpegDialog}>
+  <div class="ffmpeg-dialog">
+    <h3>ffmpeg が見つかりません</h3>
+    <p>ピーク生成とエクスポートには ffmpeg が必要です。</p>
+    {#if ffmpegDownloadError}
+      <p style="color: red;">{ffmpegDownloadError}</p>
+    {/if}
+    {#if ffmpegDownloading}
+      <p>
+        {#if ffmpegDownloadStatus === 'unpacking'}
+          展開中...
+        {:else if ffmpegDownloadStatus === 'done'}
+          完了
+        {:else}
+          ダウンロード中... {ffmpegDownloadPct}%
+        {/if}
+      </p>
+      <progress value={ffmpegDownloadPct} max="100" style="width: 100%"></progress>
+    {:else}
+      <div class="controls">
+        <button onclick={browseFfmpeg}>パスを指定</button>
+        <button onclick={autoDownloadFfmpeg}>自動ダウンロード</button>
+      </div>
+    {/if}
   </div>
 </dialog>
 
