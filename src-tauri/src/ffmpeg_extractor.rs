@@ -1,6 +1,8 @@
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
@@ -20,9 +22,20 @@ pub enum ExportFormat {
     Mp4,
 }
 
+fn ffmpeg_cmd(path: &Path) -> Command {
+    let mut cmd = Command::new(path);
+    #[cfg(windows)]
+    {
+        // Windows では Tauri メインスレッドから CLI プロセスを起動すると
+        // コンソールウィンドウが表示されるため抑制する
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 /// ffmpeg バイナリが `path` で動作するか確認する。
 pub fn probe_ffmpeg(path: &Path) -> bool {
-    Command::new(path)
+    ffmpeg_cmd(path)
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -84,7 +97,7 @@ pub fn extract_region(
 
     args.push(out_path.to_string_lossy().into_owned());
 
-    let status = Command::new(ffmpeg)
+    let status = ffmpeg_cmd(ffmpeg)
         .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -134,7 +147,7 @@ pub fn generate_peaks_streaming(
     let peaks_per_chunk = peaks_per_chunk.max(1);
 
     // ffmpeg で 44100 Hz モノ f32le PCM を stdout に出力する
-    let mut child = Command::new(ffmpeg)
+    let mut child = ffmpeg_cmd(ffmpeg)
         .args([
             "-i",
             &input.to_string_lossy(),
@@ -223,7 +236,7 @@ pub fn generate_peaks_streaming(
 
 /// ffmpeg の stderr から音声の長さを取得する。
 fn get_duration(ffmpeg: &Path, input: &Path) -> anyhow::Result<f64> {
-    let output = Command::new(ffmpeg)
+    let output = ffmpeg_cmd(ffmpeg)
         .args(["-i", &input.to_string_lossy()])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
