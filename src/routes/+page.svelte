@@ -52,11 +52,15 @@
   let ffmpegDownloadStatus = $state(""); // 'downloading' | 'unpacking' | ''
   let tagFilter: Tag | null = $state(null);
   let isDragOver = $state(false);
+  let zoomLevel = $state(100);
+  let waveformElement: HTMLDivElement | null = $state(null);
 
   const ACCEPTED_EXTENSIONS = new Set([
     'mp4', 'mkv', 'mov', 'avi', 'webm', 'flv', 'ts', 'm4v',
     'mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'opus', 'wma',
   ]);
+
+  const maxPPS = 200; 
 
   const PEAKS_COUNT = 2000;
   let peaksChunkUnlisten: (() => void) | null = null;
@@ -174,7 +178,7 @@
 
   function dispatchAction(id: ActionId) {
     switch (id) {
-      case 'playPause':    isPlaying ? wavesurfer?.pause() : wavesurfer?.play(); break;
+      case 'playPause':    wavesurfer?.isPlaying() ? wavesurfer?.pause() : wavesurfer?.play(); break;
       case 'stepBack':     stepTime(-0.5); break;
       case 'stepForward':  stepTime(0.5); break;
       case 'jumpToStart':  playRegion('start'); break;
@@ -207,7 +211,7 @@
     }
 
     const tag = (ev.target as HTMLElement)?.tagName;
-    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'BUTTON') {
       if (ev.key === 'Enter' || ev.key === 'Escape') {
         ev.preventDefault();
         (ev.target as HTMLElement).blur();
@@ -326,15 +330,20 @@
       plugins: [
         regions,
         ZoomPlugin.create({
-          maxZoom: 100,
-          scale: 0.1,
+          maxZoom: maxPPS,
+          exponentialZooming: true,
+          iterations: 10,
         }),
         TimelinePlugin.create()
       ],
       media: videoElement || undefined,
       mediaControls: true,
-      minPxPerSec: 100,
     });
+    waveformElement!.addEventListener('wheel', (e) => {
+      if (!wavesurfer?.getDuration()) {
+        e.stopPropagation();
+      }
+    }, { capture: true });
     wavesurfer.on('play', () =>{
       isPlaying = true;
       if (!regions) return;
@@ -372,6 +381,15 @@
       });
     });
     regions.on('region-removed', () => updateRegionIds());
+    wavesurfer.on('zoom', (pps) => {
+      if (!waveformElement) return;
+      const duration = wavesurfer!.getDuration();
+      if (!duration) return;
+      const minPPS = waveformElement.getBoundingClientRect().width / duration;
+      if (minPPS <= 0 || pps < minPPS) { zoomLevel = 0; return; }
+      const t = Math.log(pps / minPPS) / Math.log(maxPPS / minPPS);
+      zoomLevel = Math.round(Math.max(0, Math.min(100, t * 100)));
+    })
   });
 
   function updateRegionIds() {
@@ -576,11 +594,7 @@
     if (!wavesurfer || !regions) return;
     const region = regions.getRegions().find(r => r.id === id);
     if (!region) return;
-    if (region.end - region.start <= 0.1) {
-      wavesurfer.play(region.start);
-    }else{
-      wavesurfer.play(region.start, region.end);
-    }
+    wavesurfer.play(region.start, region.end);
   }
 
   function removeRegion(id: string) {
@@ -800,9 +814,9 @@
       <span class="file-name">{fileName}</span>
     </div>
     <video bind:this={videoElement} class="preview"></video>
-    <div id="waveform" class="waveform" role="button"></div>
+    <div id="waveform" class="waveform" role="button" bind:this={waveformElement}></div>
     <div class="controls">
-      <button onclick={() => isPlaying ? wavesurfer?.pause() : wavesurfer?.play()} title="play/pause">
+      <button onclick={() => wavesurfer?.isPlaying() ? wavesurfer?.pause() : wavesurfer?.play()} title="play/pause">
         {#if isPlaying}
           <Pause size="16"/>
         {:else}
@@ -811,7 +825,22 @@
       </button>
       <button onclick={() => stepTime(-0.5)} title="Move -0.5s"><StepBack size="16"/></button>
       <button onclick={() => stepTime(0.5)} title="Move +0.5s"><StepForward size="16"/></button>
-      <button onclick={() => playRegion("start")} title="Jump to start marker"><SkipBack size="16"/></button>
+      <button onclick={() => {
+        if (!wavesurfer || !regions) return;
+        const startMarker = regions.getRegions().find(r => r.id === 'start');
+        if (startMarker) {
+          wavesurfer.seekTo(startMarker.start / wavesurfer.getDuration());
+        }
+      }} title="Jump to start marker"><SkipBack size="16"/></button>
+      <input type="range" min="0" max="100" step="10" value={zoomLevel} oninput={(e) => {
+        if (!wavesurfer || !waveformElement) return;
+        const duration = wavesurfer.getDuration();
+        if (!duration) return;
+        const minPPS = waveformElement.getBoundingClientRect().width / duration;
+        const t = Number((e.target as HTMLInputElement).value) / 100;
+        const pps = minPPS * Math.pow(maxPPS / minPPS, t);
+        wavesurfer.zoom(pps);
+      }} title="Zoom" style="margin-left:auto"/>
     </div>
     <div class="controls">
       <button onclick={() => tempRegionStart()} title="Set temp start"><ArrowLeftToLine size="16"/></button>
@@ -883,11 +912,11 @@
               }
             }
           }}>
-            <Play size="16" onclick={() => r && playRegion(r.id)}/>
+            <Play size="16" onclick={(e) => { e.stopPropagation(); r && playRegion(r.id); }}/>
             <div class="box" style="background-color:{r?.color && tags.find(e => e.color == r.color) ? r.color : undefined}"></div>
             <span>{r?.content?.textContent ?? "Unnamed"}</span>
             <span>{r?.start.toFixed(2) + "~" + r?.end.toFixed(2)}</span>
-            <Trash2 size="16" onclick={() => {r && removeRegion(r.id)}}/>
+            <Trash2 size="16" onclick={(e) => { e.stopPropagation(); r && removeRegion(r.id); }}/>
           </button>
         {/each}
       </div>
