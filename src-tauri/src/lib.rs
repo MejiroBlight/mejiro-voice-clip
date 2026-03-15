@@ -251,10 +251,21 @@ fn mime_for(path: &Path) -> &'static str {
         .to_lowercase()
         .as_str()
     {
-        "mp4" => "video/mp4",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        _ => "application/octet-stream",
+        "mp4" | "m4v"        => "video/mp4",
+        "mkv"                => "video/x-matroska",
+        "mov"                => "video/quicktime",
+        "avi"                => "video/x-msvideo",
+        "webm"               => "video/webm",
+        "flv"                => "video/x-flv",
+        "ts"                 => "video/mp2t",
+        "mp3"                => "audio/mpeg",
+        "wav"                => "audio/wav",
+        "aac"                => "audio/aac",
+        "flac"               => "audio/flac",
+        "ogg" | "opus"       => "audio/ogg",
+        "m4a"                => "audio/mp4",
+        "wma"                => "audio/x-ms-wma",
+        _                    => "application/octet-stream",
     }
 }
 

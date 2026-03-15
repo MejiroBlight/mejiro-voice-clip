@@ -1,7 +1,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { open, confirm as tauriConfirm } from '@tauri-apps/plugin-dialog';
   import { readTextFile, writeTextFile, mkdir, BaseDirectory } from '@tauri-apps/plugin-fs';
   import WaveSurfer from 'wavesurfer.js';
   import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
@@ -49,6 +50,13 @@
   let ffmpegDownloadError = $state("");
   let ffmpegDownloadPct = $state(0);
   let ffmpegDownloadStatus = $state(""); // 'downloading' | 'unpacking' | ''
+  let tagFilter: Tag | null = $state(null);
+  let isDragOver = $state(false);
+
+  const ACCEPTED_EXTENSIONS = new Set([
+    'mp4', 'mkv', 'mov', 'avi', 'webm', 'flv', 'ts', 'm4v',
+    'mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a', 'opus', 'wma',
+  ]);
 
   const PEAKS_COUNT = 2000;
   let peaksChunkUnlisten: (() => void) | null = null;
@@ -280,6 +288,31 @@
       else pushLog(`ffmpeg: ${status}`);
     }).catch(e => pushLog(`ffmpeg check error: ${e}`));
 
+    // ファイルのドラッグ＆ドロップ読み込み
+    const unlistenDrop = getCurrentWindow().onDragDropEvent(async (event) => {
+      if (event.payload.type === 'enter' || event.payload.type === 'over') {
+        isDragOver = true;
+      } else if (event.payload.type === 'leave') {
+        isDragOver = false;
+      } else if (event.payload.type === 'drop') {
+        isDragOver = false;
+        const paths: string[] = event.payload.paths;
+        const accepted = paths.find(p => {
+          const ext = p.split('.').pop()?.toLowerCase() ?? '';
+          return ACCEPTED_EXTENSIONS.has(ext);
+        });
+        if (accepted) {
+          await initValues();
+          inputPath = accepted;
+          fileName = accepted.split(/[\\/]/).pop() || accepted;
+          pushLog(`Dropped file: ${fileName}`);
+          await loadSourceFromPath(accepted);
+        } else if (paths.length > 0) {
+          pushLog(`Unsupported file format: ${paths[0].split(/[\\/]/).pop()}`);
+        }
+      }
+    });
+
     window.addEventListener('keydown', handleKeyDown);
 
     regions = RegionsPlugin.create();
@@ -345,6 +378,11 @@
     if (!regions) return;
     regionIds = regions.getRegions()
       .filter(r => r.id !== 'start' && r.id !== 'temp')
+      .filter(r => {
+        if (!r.element) return false;
+        const tag = tags.find(t => t.color === r.color);
+        return !tagFilter || (tag && tag === tagFilter);
+      })
       .sort((a, b) => a.start - b.start)
       .map(r => r.id);
   }
@@ -365,6 +403,7 @@
     editingTag = null;
     regionManageMode = "add";
     selectedRegionId = null;
+    tagFilter = null;
   }
 
   async function openFile(){
@@ -372,7 +411,7 @@
     const input = await open({
       title: "Select an Video or Audio file",
       filters: [
-        { name: "Video/Audio", extensions: ["mp4", "mp3", "wav"] },
+        { name: "Video/Audio", extensions: ["mp4", "mkv", "mov", "avi", "webm", "flv", "ts", "mp3", "wav", "aac", "flac", "ogg", "m4a", "opus", "wma"] },
       ],
       multiple: false,
     });
@@ -603,6 +642,17 @@
     }
   }
 
+  async function removeTag(tag: Tag) {
+    if (!await tauriConfirm(`Are you sure you want to remove tag "${tag.name}"? This will reset the color of all regions with this tag.`)) {
+      return;
+    }
+    tags = tags.filter(t => t !== tag);
+    replaceTag(tag, null);
+    tagFilter = tagFilter === tag ? null : tagFilter;
+    updateRegionIds();
+    pushLog(`Tag removed: ${tag.name}`);
+  }
+
   function replaceTag(oldTag: Tag, newTag: Tag | null) {
     if (!regions) return;
     const allRegions = regions.getRegions();
@@ -743,7 +793,7 @@
   }
 </script>
 
-<main class="container">
+<main class="container" data-dragover={isDragOver}>
   <div class="left">
     <div class="controls">
       <button onclick={openFile} title="import file"><FileDown size="16"/></button>
@@ -806,13 +856,19 @@
           <option value="add">Add Region</option>
           <option value="edit">Edit Region</option>
         </select>
+        <select bind:value={tagFilter} onchange={updateRegionIds}>
+          <option value={null}>All Tags</option>
+          {#each tags as tag}
+            <option value={tag} style="background-color: {tag.color};">{tag.name}</option>
+          {/each}
+        </select>
         <button onclick={() =>{
           if (exportDialog) {
             exportDialog.showModal();
             exportProgress = 0;
           }
         }}>
-          Export All
+          Export
         </button>
       </div>
       <div class="list">
@@ -828,7 +884,7 @@
             }
           }}>
             <Play size="16" onclick={() => r && playRegion(r.id)}/>
-            <div class="box" style="background-color:{r?.color ?? undefined}"></div>
+            <div class="box" style="background-color:{r?.color && tags.find(e => e.color == r.color) ? r.color : undefined}"></div>
             <span>{r?.content?.textContent ?? "Unnamed"}</span>
             <span>{r?.start.toFixed(2) + "~" + r?.end.toFixed(2)}</span>
             <Trash2 size="16" onclick={() => {r && removeRegion(r.id)}}/>
@@ -866,6 +922,7 @@
         }}>
           <div class="box" style="background-color:{tag.color}"></div>
           <span>{tag.name}</span>
+          <Trash2 size="16" onclick={() => removeTag(tag)} style="margin-left: auto;"/>
         </button>
       {/each}
     </div>
@@ -902,7 +959,7 @@
   </div>
 </dialog>
 
-<dialog bind:this={exportingDialog}>
+<dialog bind:this={exportingDialog} oncancel={(e) => { e.preventDefault(); }}>
   <div class="exporting-dialog">
     <span>Exporting... Please wait.</span>
     <progress value={exportProgress} max="100" style="width: 100%"></progress>
@@ -932,12 +989,12 @@
     </div>
     <div class="controls" style="margin-top: 8px;">
       <button onclick={() => { shortcuts = { ...DEFAULT_SHORTCUTS }; saveShortcuts(); }}>Reset All</button>
-      <button onclick={tryCloseShortcutDialog} style="margin-left: auto;" disabled={conflictIds.size > 0} title={conflictIds.size > 0 ? 'キー競合を解消してください' : ''}>Close</button>
+      <button onclick={tryCloseShortcutDialog} style="margin-left: auto;">Close</button>
     </div>
   </div>
 </dialog>
 
-<dialog bind:this={ffmpegDialog}>
+<dialog bind:this={ffmpegDialog} oncancel={(e) => { e.preventDefault(); }}>
   <div class="ffmpeg-dialog">
     <h3>ffmpeg が見つかりません</h3>
     <p>ピーク生成とエクスポートには ffmpeg が必要です。</p>
@@ -975,6 +1032,23 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   height: calc(100vh - 16px);
+  position: relative;
+  &[data-dragover="true"]::after {
+    content: 'Drop file here';
+    position: absolute;
+    inset: 0;
+    background: rgba(108, 129, 248, 0.18);
+    border: 3px dashed #6c81f8;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: #6c81f8;
+    pointer-events: none;
+    z-index: 100;
+  }
 }
 
 .controls { 
@@ -1065,6 +1139,7 @@
     }
     & .box {
       height: 16px;
+      background-color: var(--default-region-color);
     }
   }
 }
