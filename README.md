@@ -1,7 +1,7 @@
 # mejiro voice clip
 
 音声・動画ファイルからクリップを切り出してエクスポートするデスクトップアプリケーションです。
-![alt text](image.png)
+![alt text](image-1.png)
 
 ## スタック
 
