@@ -39,6 +39,7 @@
   let logPanelBody: HTMLDivElement | null = $state(null);
   let exportDialog: HTMLDialogElement | null = $state(null);
   let exportMode: "index_tag_name" | "tag_name" | "start_tag_name" | "name" = $state("index_tag_name");
+  let exportFormat: "wav" | "mp4" = $state("wav");
   let exportPath: string | null = $state(null);
   let exportProgress = $state(0);
   let exportingDialog: HTMLDialogElement | null = $state(null);
@@ -728,7 +729,7 @@
         pushLog(event.payload);
       });
       exportingDialog?.showModal();
-      await invoke('export_regions', { inputPath, outDir: exportPath, regions: exportData });
+      await invoke('export_regions', { inputPath, outDir: exportPath, regions: exportData, format: exportFormat });
       pushLog(`Exported ${exportData.length} regions to ${exportPath}`);
     } catch (error) {
       console.error("Error exporting regions:", error);
@@ -885,6 +886,13 @@
         <option value="tag_name">tag_name</option>
         <option value="start_tag_name">start_tag_name</option>
         <option value="name">name</option>
+      </select>
+    </div>
+    <div class=controls>
+      Format:
+      <select bind:value={exportFormat}>
+        <option value="wav">WAV (audio only)</option>
+        <option value="mp4">MP4 (video clip)</option>
       </select>
     </div>
     <div class=controls>

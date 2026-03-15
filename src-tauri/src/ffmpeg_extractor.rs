@@ -13,6 +13,13 @@ pub struct Region {
     pub end: f64,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Wav,
+    Mp4,
+}
+
 /// ffmpeg バイナリが `path` で動作するか確認する。
 pub fn probe_ffmpeg(path: &Path) -> bool {
     Command::new(path)
@@ -24,35 +31,61 @@ pub fn probe_ffmpeg(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// リージョン範囲を WAV としてエクスポートする。
+/// リージョン範囲を WAV または MP4 としてエクスポートする。
 pub fn extract_region(
     ffmpeg: &Path,
     input: &Path,
     output_dir: &Path,
     region: &Region,
+    format: &ExportFormat,
 ) -> anyhow::Result<()> {
-    let mut file_name = region.name.clone();
-    if !file_name.to_lowercase().ends_with(".wav") {
-        file_name.push_str(".wav");
-    }
+    let file_name = match format {
+        ExportFormat::Wav => {
+            let mut n = region.name.clone();
+            if !n.to_lowercase().ends_with(".wav") { n.push_str(".wav"); }
+            n
+        }
+        ExportFormat::Mp4 => {
+            let mut n = region.name.clone();
+            if !n.to_lowercase().ends_with(".mp4") { n.push_str(".mp4"); }
+            n
+        }
+    };
     let out_path = output_dir.join(&file_name);
 
+    // 共通引数: 入力・タイムレンジ
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-ss".into(), format!("{:.6}", region.start),
+        "-to".into(), format!("{:.6}", region.end),
+        "-i".into(), input.to_string_lossy().into_owned(),
+    ];
+
+    match format {
+        ExportFormat::Wav => {
+            args.extend([
+                "-vn".into(),
+                "-acodec".into(), "pcm_s16le".into(),
+                "-ar".into(), "44100".into(),
+            ]);
+        }
+        ExportFormat::Mp4 => {
+            // 映像: libx264 (fast preset) / 音声: aac
+            args.extend([
+                "-vcodec".into(), "libx264".into(),
+                "-preset".into(), "fast".into(),
+                "-crf".into(), "18".into(),
+                "-acodec".into(), "aac".into(),
+                "-b:a".into(), "192k".into(),
+                "-movflags".into(), "+faststart".into(),
+            ]);
+        }
+    }
+
+    args.push(out_path.to_string_lossy().into_owned());
+
     let status = Command::new(ffmpeg)
-        .args([
-            "-y",
-            "-ss",
-            &format!("{:.6}", region.start),
-            "-to",
-            &format!("{:.6}", region.end),
-            "-i",
-            &input.to_string_lossy(),
-            "-vn",
-            "-acodec",
-            "pcm_s16le",
-            "-ar",
-            "44100",
-            &out_path.to_string_lossy(),
-        ])
+        .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()

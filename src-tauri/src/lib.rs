@@ -8,7 +8,7 @@ use std::sync::{
 use tauri::{AppHandle, Emitter, State};
 
 mod ffmpeg_extractor;
-use ffmpeg_extractor::Region;
+use ffmpeg_extractor::{ExportFormat, Region};
 
 // ---- 共有状態 ---------------------------------------------------------------
 
@@ -183,7 +183,7 @@ async fn generate_peaks(
     .map_err(|e| e.to_string())?
 }
 
-/// リージョンを WAV としてエクスポートする。
+/// リージョンをエクスポートする。
 #[tauri::command]
 fn export_regions(
     app: AppHandle,
@@ -191,6 +191,7 @@ fn export_regions(
     input_path: String,
     out_dir: String,
     regions: Vec<Region>,
+    format: ExportFormat,
 ) -> Result<(), String> {
     let ffmpeg = {
         let guard = ffmpeg_state.0.lock().map_err(|e| e.to_string())?;
@@ -218,7 +219,7 @@ fn export_regions(
         );
         let _ = app.emit("export-log", msg);
 
-        ffmpeg_extractor::extract_region(&ffmpeg, &input_path, &out_dir, &region)
+        ffmpeg_extractor::extract_region(&ffmpeg, &input_path, &out_dir, &region, &format)
             .map_err(|e| format!("failed to export region: {e}"))?;
 
         let _ = app.emit("export-log", format!("Finished: {}", region.name));
